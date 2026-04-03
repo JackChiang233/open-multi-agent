@@ -122,6 +122,7 @@ npx tsx examples/01-single-agent.ts
 | [06 — Local Model](examples/06-local-model.ts) | Ollama + Claude in one pipeline via `baseURL` (works with vLLM, LM Studio, etc.) |
 | [07 — Fan-Out / Aggregate](examples/07-fan-out-aggregate.ts) | `runParallel()` MapReduce — 3 analysts in parallel, then synthesize |
 | [08 — Gemma 4 Local](examples/08-gemma4-local.ts) | Pure-local Gemma 4 agent team with tool-calling — zero API cost |
+| [09 — Gemma 4 Auto-Orchestration](examples/09-gemma4-auto-orchestration.ts) | `runTeam()` with Gemma 4 as coordinator — auto task decomposition, fully local |
 
 ## Architecture
 

@@ -126,6 +126,7 @@ npx tsx examples/01-single-agent.ts
 | [06 — 本地模型](examples/06-local-model.ts) | Ollama + Claude 混合流水线，通过 `baseURL` 接入（兼容 vLLM、LM Studio 等） |
 | [07 — 扇出聚合](examples/07-fan-out-aggregate.ts) | `runParallel()` MapReduce — 3 个分析师并行，然后综合 |
 | [08 — Gemma 4 本地](examples/08-gemma4-local.ts) | 纯本地 Gemma 4 智能体团队 + tool-calling — 零 API 费用 |
+| [09 — Gemma 4 自动编排](examples/09-gemma4-auto-orchestration.ts) | `runTeam()` 用 Gemma 4 当 coordinator — 自动任务拆解，完全本地 |
 
 ## 架构
 
