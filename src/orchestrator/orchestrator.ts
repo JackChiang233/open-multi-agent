@@ -128,9 +128,10 @@ export async function executeWithRetry(
   onRetry?: (data: { attempt: number; maxAttempts: number; error: string; nextDelayMs: number }) => void,
   delayFn: (ms: number) => Promise<void> = sleep,
 ): Promise<AgentRunResult> {
-  const maxAttempts = Math.max(0, task.maxRetries ?? 0) + 1
-  const baseDelay = Math.max(0, task.retryDelayMs ?? 1000)
-  const backoff = Math.max(1, task.retryBackoff ?? 2)
+  const rawRetries = Number.isFinite(task.maxRetries) ? task.maxRetries! : 0
+  const maxAttempts = Math.max(0, rawRetries) + 1
+  const baseDelay = Math.max(0, Number.isFinite(task.retryDelayMs) ? task.retryDelayMs! : 1000)
+  const backoff = Math.max(1, Number.isFinite(task.retryBackoff) ? task.retryBackoff! : 2)
 
   let lastError: string = ''
   // Accumulate token usage across all attempts so billing/observability
