@@ -29,6 +29,7 @@ import type {
   LoopDetectionConfig,
   LoopDetectionInfo,
 } from '../types.js'
+import { TokenBudgetExceededError } from '../errors.js'
 import { LoopDetector } from './loop-detector.js'
 import { emitTrace } from '../utils/trace.js'
 import type { ToolRegistry } from '../tool/framework.js'
@@ -70,6 +71,8 @@ export interface RunnerOptions {
   readonly agentRole?: string
   /** Loop detection configuration. When set, detects stuck agent loops. */
   readonly loopDetection?: LoopDetectionConfig
+  /** Maximum cumulative tokens (input + output) allowed for this run. */
+  readonly maxTokenBudget?: number
 }
 
 /**
@@ -117,6 +120,8 @@ export interface RunResult {
   readonly turns: number
   /** True when the run was terminated or warned due to loop detection. */
   readonly loopDetected?: boolean
+  /** True when the run was terminated due to token budget limits. */
+  readonly budgetExceeded?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -217,6 +222,7 @@ export class AgentRunner {
    *  - `{ type: 'text', data: string }` for each text delta
    *  - `{ type: 'tool_use', data: ToolUseBlock }` when the model requests a tool
    *  - `{ type: 'tool_result', data: ToolResultBlock }` after each execution
+ *  - `{ type: 'budget_exceeded', data: TokenBudgetExceededError }` on budget trip
    *  - `{ type: 'done', data: RunResult }` at the very end
    *  - `{ type: 'error', data: Error }` on unrecoverable failure
    */
@@ -232,6 +238,7 @@ export class AgentRunner {
     const allToolCalls: ToolCallRecord[] = []
     let finalOutput = ''
     let turns = 0
+    let budgetExceeded = false
 
     // Build the stable LLM options once; model / tokens / temp don't change.
     // toToolDefs() returns LLMToolDef[] (inputSchema, camelCase) — matches
@@ -316,6 +323,21 @@ export class AgentRunner {
         const turnText = extractText(response.content)
         if (turnText.length > 0) {
           yield { type: 'text', data: turnText } satisfies StreamEvent
+        }
+
+        const totalTokens = totalUsage.input_tokens + totalUsage.output_tokens
+        if (this.options.maxTokenBudget !== undefined && totalTokens > this.options.maxTokenBudget) {
+          budgetExceeded = true
+          finalOutput = turnText
+          yield {
+            type: 'budget_exceeded',
+            data: new TokenBudgetExceededError(
+              this.options.agentName ?? 'unknown',
+              totalTokens,
+              this.options.maxTokenBudget,
+            ),
+          } satisfies StreamEvent
+          break
         }
 
         // Extract tool-use blocks for detection and execution.
@@ -516,6 +538,7 @@ export class AgentRunner {
       tokenUsage: totalUsage,
       turns,
       ...(loopDetected ? { loopDetected: true } : {}),
+      ...(budgetExceeded ? { budgetExceeded: true } : {}),
     }
 
     yield { type: 'done', data: runResult } satisfies StreamEvent

@@ -63,6 +63,7 @@ import { Team } from '../team/team.js'
 import { TaskQueue } from '../task/queue.js'
 import { createTask } from '../task/task.js'
 import { Scheduler } from './scheduler.js'
+import { TokenBudgetExceededError } from '../errors.js'
 
 // ---------------------------------------------------------------------------
 // Internal constants
@@ -81,6 +82,12 @@ function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
     input_tokens: a.input_tokens + b.input_tokens,
     output_tokens: a.output_tokens + b.output_tokens,
   }
+}
+
+function resolveTokenBudget(primary?: number, fallback?: number): number | undefined {
+  if (primary === undefined) return fallback
+  if (fallback === undefined) return primary
+  return Math.min(primary, fallback)
 }
 
 /**
@@ -266,6 +273,10 @@ interface RunContext {
   readonly runId?: string
   /** AbortSignal for run-level cancellation. Checked between task dispatch rounds. */
   readonly abortSignal?: AbortSignal
+  cumulativeUsage: TokenUsage
+  readonly maxTokenBudget?: number
+  budgetExceededTriggered: boolean
+  budgetExceededReason?: string
 }
 
 /**
@@ -409,6 +420,23 @@ async function executeQueue(
       }
 
       ctx.agentResults.set(`${assignee}:${task.id}`, result)
+      ctx.cumulativeUsage = addUsage(ctx.cumulativeUsage, result.tokenUsage)
+      const totalTokens = ctx.cumulativeUsage.input_tokens + ctx.cumulativeUsage.output_tokens
+      if (
+        !ctx.budgetExceededTriggered
+        && ctx.maxTokenBudget !== undefined
+        && totalTokens > ctx.maxTokenBudget
+      ) {
+        ctx.budgetExceededTriggered = true
+        const err = new TokenBudgetExceededError('orchestrator', totalTokens, ctx.maxTokenBudget)
+        ctx.budgetExceededReason = err.message
+        config.onProgress?.({
+          type: 'budget_exceeded',
+          agent: assignee,
+          task: task.id,
+          data: err,
+        } satisfies OrchestratorEvent)
+      }
 
       if (result.success) {
         // Persist result into shared memory so other agents can read it
@@ -446,6 +474,10 @@ async function executeQueue(
 
     // Wait for the entire parallel batch before checking for newly-unblocked tasks.
     await Promise.all(dispatchPromises)
+    if (ctx.budgetExceededTriggered) {
+      queue.skipRemaining(ctx.budgetExceededReason ?? 'Skipped: token budget exceeded.')
+      break
+    }
 
     // --- Approval gate ---
     // After the batch completes, check if the caller wants to approve
@@ -524,8 +556,8 @@ async function buildTaskPrompt(task: Task, team: Team): Promise<string> {
  */
 export class OpenMultiAgent {
   private readonly config: Required<
-    Omit<OrchestratorConfig, 'onApproval' | 'onProgress' | 'onTrace' | 'defaultBaseURL' | 'defaultApiKey'>
-  > & Pick<OrchestratorConfig, 'onApproval' | 'onProgress' | 'onTrace' | 'defaultBaseURL' | 'defaultApiKey'>
+    Omit<OrchestratorConfig, 'onApproval' | 'onProgress' | 'onTrace' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget'>
+  > & Pick<OrchestratorConfig, 'onApproval' | 'onProgress' | 'onTrace' | 'defaultBaseURL' | 'defaultApiKey' | 'maxTokenBudget'>
 
   private readonly teams: Map<string, Team> = new Map()
   private completedTaskCount = 0
@@ -545,6 +577,7 @@ export class OpenMultiAgent {
       defaultProvider: config.defaultProvider ?? 'anthropic',
       defaultBaseURL: config.defaultBaseURL,
       defaultApiKey: config.defaultApiKey,
+      maxTokenBudget: config.maxTokenBudget,
       onApproval: config.onApproval,
       onProgress: config.onProgress,
       onTrace: config.onTrace,
@@ -592,11 +625,13 @@ export class OpenMultiAgent {
    * @param prompt - The user prompt to send.
    */
   async runAgent(config: AgentConfig, prompt: string): Promise<AgentRunResult> {
+    const effectiveBudget = resolveTokenBudget(config.maxTokenBudget, this.config.maxTokenBudget)
     const effective: AgentConfig = {
       ...config,
       provider: config.provider ?? this.config.defaultProvider,
       baseURL: config.baseURL ?? this.config.defaultBaseURL,
       apiKey: config.apiKey ?? this.config.defaultApiKey,
+      maxTokenBudget: effectiveBudget,
     }
     const agent = buildAgent(effective)
     this.config.onProgress?.({
@@ -610,6 +645,18 @@ export class OpenMultiAgent {
       : undefined
 
     const result = await agent.run(prompt, traceOptions)
+
+    if (result.budgetExceeded) {
+      this.config.onProgress?.({
+        type: 'budget_exceeded',
+        agent: config.name,
+        data: new TokenBudgetExceededError(
+          config.name,
+          result.tokenUsage.input_tokens + result.tokenUsage.output_tokens,
+          effectiveBudget ?? 0,
+        ),
+      })
+    }
 
     this.config.onProgress?.({
       type: 'agent_complete',
@@ -681,6 +728,24 @@ export class OpenMultiAgent {
     const decompositionResult = await coordinatorAgent.run(decompositionPrompt, decompTraceOptions)
     const agentResults = new Map<string, AgentRunResult>()
     agentResults.set('coordinator:decompose', decompositionResult)
+    const maxTokenBudget = this.config.maxTokenBudget
+    let cumulativeUsage = addUsage(ZERO_USAGE, decompositionResult.tokenUsage)
+
+    if (
+      maxTokenBudget !== undefined
+      && cumulativeUsage.input_tokens + cumulativeUsage.output_tokens > maxTokenBudget
+    ) {
+      this.config.onProgress?.({
+        type: 'budget_exceeded',
+        agent: 'coordinator',
+        data: new TokenBudgetExceededError(
+          'coordinator',
+          cumulativeUsage.input_tokens + cumulativeUsage.output_tokens,
+          maxTokenBudget,
+        ),
+      })
+      return this.buildTeamRunResult(agentResults)
+    }
 
     // ------------------------------------------------------------------
     // Step 2: Parse tasks from coordinator output
@@ -724,19 +789,45 @@ export class OpenMultiAgent {
       config: this.config,
       runId,
       abortSignal: options?.abortSignal,
+      cumulativeUsage,
+      maxTokenBudget,
+      budgetExceededTriggered: false,
+      budgetExceededReason: undefined,
     }
 
     await executeQueue(queue, ctx)
+    cumulativeUsage = ctx.cumulativeUsage
 
     // ------------------------------------------------------------------
     // Step 5: Coordinator synthesises final result
     // ------------------------------------------------------------------
+    if (
+      maxTokenBudget !== undefined
+      && cumulativeUsage.input_tokens + cumulativeUsage.output_tokens > maxTokenBudget
+    ) {
+      return this.buildTeamRunResult(agentResults)
+    }
     const synthesisPrompt = await this.buildSynthesisPrompt(goal, queue.list(), team)
     const synthTraceOptions: Partial<RunOptions> | undefined = this.config.onTrace
       ? { onTrace: this.config.onTrace, runId: runId ?? '', traceAgent: 'coordinator' }
       : undefined
     const synthesisResult = await coordinatorAgent.run(synthesisPrompt, synthTraceOptions)
     agentResults.set('coordinator', synthesisResult)
+    cumulativeUsage = addUsage(cumulativeUsage, synthesisResult.tokenUsage)
+    if (
+      maxTokenBudget !== undefined
+      && cumulativeUsage.input_tokens + cumulativeUsage.output_tokens > maxTokenBudget
+    ) {
+      this.config.onProgress?.({
+        type: 'budget_exceeded',
+        agent: 'coordinator',
+        data: new TokenBudgetExceededError(
+          'coordinator',
+          cumulativeUsage.input_tokens + cumulativeUsage.output_tokens,
+          maxTokenBudget,
+        ),
+      })
+    }
 
     this.config.onProgress?.({
       type: 'agent_complete',
@@ -808,6 +899,10 @@ export class OpenMultiAgent {
       config: this.config,
       runId: this.config.onTrace ? generateRunId() : undefined,
       abortSignal: options?.abortSignal,
+      cumulativeUsage: ZERO_USAGE,
+      maxTokenBudget: this.config.maxTokenBudget,
+      budgetExceededTriggered: false,
+      budgetExceededReason: undefined,
     }
 
     await executeQueue(queue, ctx)

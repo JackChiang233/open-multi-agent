@@ -90,11 +90,12 @@ export interface LLMResponse {
  * - `text`        — incremental text delta
  * - `tool_use`    — the model has begun or completed a tool-use block
  * - `tool_result` — a tool result has been appended to the stream
+ * - `budget_exceeded` — token budget threshold reached for this run
  * - `done`        — the stream has ended; `data` is the final {@link LLMResponse}
  * - `error`       — an unrecoverable error occurred; `data` is an `Error`
  */
 export interface StreamEvent {
-  readonly type: 'text' | 'tool_use' | 'tool_result' | 'loop_detected' | 'done' | 'error'
+  readonly type: 'text' | 'tool_use' | 'tool_result' | 'loop_detected' | 'budget_exceeded' | 'done' | 'error'
   readonly data: unknown
 }
 
@@ -208,6 +209,8 @@ export interface AgentConfig {
   readonly tools?: readonly string[]
   readonly maxTurns?: number
   readonly maxTokens?: number
+  /** Maximum cumulative tokens (input + output) allowed for this run. */
+  readonly maxTokenBudget?: number
   readonly temperature?: number
   /**
    * Maximum wall-clock time (in milliseconds) for the entire agent run.
@@ -307,6 +310,8 @@ export interface AgentRunResult {
   readonly structured?: unknown
   /** True when the run was terminated or warned due to loop detection. */
   readonly loopDetected?: boolean
+  /** True when the run stopped because token budget was exceeded. */
+  readonly budgetExceeded?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +380,7 @@ export interface OrchestratorEvent {
     | 'task_complete'
     | 'task_skipped'
     | 'task_retry'
+    | 'budget_exceeded'
     | 'message'
     | 'error'
   readonly agent?: string
@@ -385,6 +391,8 @@ export interface OrchestratorEvent {
 /** Top-level configuration for the orchestrator. */
 export interface OrchestratorConfig {
   readonly maxConcurrency?: number
+  /** Maximum cumulative tokens (input + output) allowed per orchestrator run. */
+  readonly maxTokenBudget?: number
   readonly defaultModel?: string
   readonly defaultProvider?: 'anthropic' | 'copilot' | 'grok' | 'openai' | 'gemini'
   readonly defaultBaseURL?: string
