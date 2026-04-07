@@ -146,7 +146,9 @@ export class Agent {
       maxTurns: this.config.maxTurns,
       maxTokens: this.config.maxTokens,
       temperature: this.config.temperature,
+      toolPreset: this.config.toolPreset,
       allowedTools: this.config.tools,
+      disallowedTools: this.config.disallowedTools,
       agentName: this.name,
       agentRole: this.config.systemPrompt?.slice(0, 50) ?? 'assistant',
       loopDetection: this.config.loopDetection,
@@ -261,7 +263,7 @@ export class Agent {
    * The tool becomes available to the next LLM call — no restart required.
    */
   addTool(tool: FrameworkToolDefinition): void {
-    this._toolRegistry.register(tool)
+    this._toolRegistry.register(tool, { runtimeAdded: true })
   }
 
   /**
