@@ -23,7 +23,7 @@ import type { AgentConfig, OrchestratorEvent } from '../src/types.js'
 // ---------------------------------------------------------------------------
 const architect: AgentConfig = {
   name: 'architect',
-  model: 'deepseek-chat',
+  model: 'deepseek-reasoner',
   provider: 'deepseek',
   systemPrompt: `You are a software architect with deep experience in Node.js and REST API design.
 Your job is to design clear, production-quality API contracts and file/directory structures.

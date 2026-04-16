@@ -23,7 +23,7 @@ export class DeepSeekAdapter extends OpenAIAdapter {
     // Allow override of baseURL (for proxies or future changes) but default to official DeepSeek endpoint.
     super(
       apiKey ?? process.env['DEEPSEEK_API_KEY'],
-      baseURL ?? 'https://api.deepseek.com'
+      baseURL ?? 'https://api.deepseek.com/v1'
     )
   }
 }
