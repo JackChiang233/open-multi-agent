@@ -23,6 +23,7 @@ import type {
   StreamEvent,
   ToolResult,
   ToolUseContext,
+  TeamInfo,
   LLMAdapter,
   LLMChatOptions,
   TraceEvent,
@@ -134,6 +135,11 @@ export interface RunOptions {
    * {@link RunnerOptions.abortSignal}. Useful for per-run timeouts.
    */
   readonly abortSignal?: AbortSignal
+  /**
+   * Team context for built-in tools such as `delegate_to_agent`.
+   * Injected by the orchestrator during `runTeam` / `runTasks` pool runs.
+   */
+  readonly team?: TeamInfo
 }
 
 /** The aggregated result returned when a full run completes. */
@@ -733,11 +739,12 @@ export class AgentRunner {
         // Parallel execution is critical for multi-tool responses where the
         // tools are independent (e.g. reading several files at once).
         // ------------------------------------------------------------------
-        const toolContext: ToolUseContext = this.buildToolContext(effectiveAbortSignal)
+        const toolContext: ToolUseContext = this.buildToolContext(options)
 
         const executionPromises = toolUseBlocks.map(async (block): Promise<{
           resultBlock: ToolResultBlock
           record: ToolCallRecord
+          delegationUsage?: TokenUsage
         }> => {
           options.onToolCall?.(block.name, block.input)
 
@@ -789,11 +796,29 @@ export class AgentRunner {
             is_error: result.isError,
           }
 
-          return { resultBlock, record }
+          return {
+            resultBlock,
+            record,
+            ...(result.metadata?.tokenUsage !== undefined
+              ? { delegationUsage: result.metadata.tokenUsage }
+              : {}),
+          }
         })
 
         // Wait for every tool in this turn to finish.
         const executions = await Promise.all(executionPromises)
+
+        // Roll up any nested-run token usage surfaced via ToolResult.metadata
+        // (e.g. from delegate_to_agent) so it counts against this agent's budget.
+        let delegationTurnUsage: TokenUsage | undefined
+        for (const ex of executions) {
+          if (ex.delegationUsage !== undefined) {
+            totalUsage = addTokenUsage(totalUsage, ex.delegationUsage)
+            delegationTurnUsage = delegationTurnUsage === undefined
+              ? ex.delegationUsage
+              : addTokenUsage(delegationTurnUsage, ex.delegationUsage)
+          }
+        }
 
         // ------------------------------------------------------------------
         // Step 5: Accumulate results and build the user message that carries
@@ -827,6 +852,27 @@ export class AgentRunner {
 
         conversationMessages.push(toolResultMessage)
         options.onMessage?.(toolResultMessage)
+
+        // Budget check is deferred until tool_result events have been yielded
+        // and the tool_result user message has been appended, so stream
+        // consumers see matched tool_use/tool_result pairs and the returned
+        // `messages` remain resumable against the Anthropic/OpenAI APIs.
+        if (delegationTurnUsage !== undefined && this.options.maxTokenBudget !== undefined) {
+          const totalAfterDelegation = totalUsage.input_tokens + totalUsage.output_tokens
+          if (totalAfterDelegation > this.options.maxTokenBudget) {
+            budgetExceeded = true
+            finalOutput = turnText
+            yield {
+              type: 'budget_exceeded',
+              data: new TokenBudgetExceededError(
+                this.options.agentName ?? 'unknown',
+                totalAfterDelegation,
+                this.options.maxTokenBudget,
+              ),
+            } satisfies StreamEvent
+            break
+          }
+        }
 
         // Loop back to Step 1 — send updated conversation to the LLM.
       }
@@ -968,8 +1014,10 @@ export class AgentRunner {
           }
           // Short results: preserve.
           if (block.content.length < minToolResultChars) return block
-          // Compress.
           const toolName = toolNameMap.get(block.tool_use_id) ?? 'unknown'
+          // Delegation results: preserve — parent agent may still reason over them.
+          if (toolName === 'delegate_to_agent') return block
+          // Compress.
           msgChanged = true
           return {
             type: 'tool_result',
@@ -1024,6 +1072,16 @@ export class AgentRunner {
     // Nothing to compress if there's at most one tool-result user message.
     if (lastToolResultUserIdx <= 0) return messages
 
+    // Build a tool_use_id → tool name map so we can exempt delegation results,
+    // whose full output the parent agent may need to re-read in later turns.
+    const toolNameMap = new Map<string, string>()
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue
+      for (const block of msg.content) {
+        if (block.type === 'tool_use') toolNameMap.set(block.id, block.name)
+      }
+    }
+
     let anyChanged = false
     const result = messages.map((msg, idx) => {
       // Only compress user messages that appear before the last one.
@@ -1038,6 +1096,9 @@ export class AgentRunner {
 
         // Never compress error results — they carry diagnostic value.
         if (block.is_error) return block
+
+        // Never compress delegation results — the parent agent relies on the full sub-agent output.
+        if (toolNameMap.get(block.tool_use_id) === 'delegate_to_agent') return block
 
         // Skip already-compressed results — avoid re-compression with wrong char count.
         if (block.content.startsWith('[Tool output compressed')) return block
@@ -1067,14 +1128,15 @@ export class AgentRunner {
    * Build the {@link ToolUseContext} passed to every tool execution.
    * Identifies this runner as the invoking agent.
    */
-  private buildToolContext(abortSignal?: AbortSignal): ToolUseContext {
+  private buildToolContext(options: RunOptions = {}): ToolUseContext {
     return {
       agent: {
         name: this.options.agentName ?? 'runner',
         role: this.options.agentRole ?? 'assistant',
         model: this.options.model,
       },
-      abortSignal,
+      abortSignal: options.abortSignal ?? this.options.abortSignal,
+      ...(options.team !== undefined ? { team: options.team } : {}),
     }
   }
 }

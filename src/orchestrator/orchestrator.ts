@@ -50,6 +50,7 @@ import type {
   Task,
   TaskStatus,
   TeamConfig,
+  TeamInfo,
   TeamRunResult,
   TokenUsage,
 } from '../types.js'
@@ -73,6 +74,7 @@ import { extractKeywords, keywordScore } from '../utils/keywords.js'
 
 const ZERO_USAGE: TokenUsage = { input_tokens: 0, output_tokens: 0 }
 const DEFAULT_MAX_CONCURRENCY = 5
+const DEFAULT_MAX_DELEGATION_DEPTH = 3
 const DEFAULT_MODEL = 'claude-opus-4-6'
 
 // ---------------------------------------------------------------------------
@@ -207,11 +209,14 @@ function resolveTokenBudget(primary?: number, fallback?: number): number | undef
 
 /**
  * Build a minimal {@link Agent} with its own fresh registry/executor.
- * Registers all built-in tools so coordinator/worker agents can use them.
+ * Pool workers pass `includeDelegateTool` so `delegate_to_agent` is available during `runTeam` / `runTasks`.
  */
-function buildAgent(config: AgentConfig): Agent {
+function buildAgent(
+  config: AgentConfig,
+  toolRegistration?: { readonly includeDelegateTool?: boolean },
+): Agent {
   const registry = new ToolRegistry()
-  registerBuiltInTools(registry)
+  registerBuiltInTools(registry, toolRegistration)
   if (config.customTools) {
     for (const tool of config.customTools) {
       registry.register(tool, { runtimeAdded: true })
@@ -412,6 +417,91 @@ interface RunContext {
 }
 
 /**
+ * Build {@link TeamInfo} for tool context, including nested `runDelegatedAgent`
+ * that respects pool capacity to avoid semaphore deadlocks.
+ *
+ * Delegation always builds a **fresh** Agent instance for the target and runs
+ * it via `pool.runEphemeral` — the pool semaphore still gates total concurrency,
+ * but the per-agent lock is bypassed. This matches `delegate_to_agent`'s "runs
+ * in a fresh conversation for this prompt only" contract and prevents mutual
+ * delegation (A→B while B→A) from deadlocking on each other's agent locks.
+ */
+function buildTaskAgentTeamInfo(
+  ctx: RunContext,
+  taskId: string,
+  traceBase: Partial<RunOptions>,
+  delegationDepth: number,
+  delegationChain: readonly string[],
+): TeamInfo {
+  const sharedMem = ctx.team.getSharedMemoryInstance()
+  const maxDepth = ctx.config.maxDelegationDepth
+  const agentConfigs = ctx.team.getAgents()
+  const agentNames = agentConfigs.map((a) => a.name)
+
+  const runDelegatedAgent = async (targetAgent: string, prompt: string): Promise<AgentRunResult> => {
+    const pool = ctx.pool
+    if (pool.availableRunSlots < 1) {
+      return {
+        success: false,
+        output:
+          'Agent pool has no free concurrency slot for a delegated run (would deadlock). ' +
+          'Increase maxConcurrency or reduce parallel delegation.',
+        messages: [],
+        tokenUsage: ZERO_USAGE,
+        toolCalls: [],
+      }
+    }
+
+    const targetConfig = agentConfigs.find((a) => a.name === targetAgent)
+    if (!targetConfig) {
+      return {
+        success: false,
+        output: `Unknown agent "${targetAgent}" — not in team roster [${agentNames.join(', ')}].`,
+        messages: [],
+        tokenUsage: ZERO_USAGE,
+        toolCalls: [],
+      }
+    }
+
+    // Apply orchestrator-level defaults just like buildPool, then construct a
+    // one-shot Agent for this delegation only.
+    const effective: AgentConfig = {
+      ...targetConfig,
+      provider: targetConfig.provider ?? ctx.config.defaultProvider,
+      baseURL: targetConfig.baseURL ?? ctx.config.defaultBaseURL,
+      apiKey: targetConfig.apiKey ?? ctx.config.defaultApiKey,
+    }
+    const tempAgent = buildAgent(effective, { includeDelegateTool: true })
+
+    const nestedTeam = buildTaskAgentTeamInfo(
+      ctx,
+      taskId,
+      traceBase,
+      delegationDepth + 1,
+      [...delegationChain, targetAgent],
+    )
+    const childOpts: Partial<RunOptions> = {
+      ...traceBase,
+      traceAgent: targetAgent,
+      taskId,
+      team: nestedTeam,
+    }
+    return pool.runEphemeral(tempAgent, prompt, childOpts)
+  }
+
+  return {
+    name: ctx.team.name,
+    agents: agentNames,
+    ...(sharedMem ? { sharedMemory: sharedMem.getStore() } : {}),
+    delegationDepth,
+    maxDelegationDepth: maxDepth,
+    delegationPool: ctx.pool,
+    delegationChain,
+    runDelegatedAgent,
+  }
+}
+
+/**
  * Execute all tasks in `queue` using agents in `pool`, respecting dependencies
  * and running independent tasks in parallel.
  *
@@ -509,16 +599,28 @@ async function executeQueue(
       // Build the prompt: task description + dependency-only context by default.
       const prompt = await buildTaskPrompt(task, team, queue)
 
-      // Build trace context for this task's agent run
-      const traceOptions: Partial<RunOptions> | undefined = config.onTrace
-        ? { onTrace: config.onTrace, runId: ctx.runId ?? '', taskId: task.id, traceAgent: assignee, abortSignal: ctx.abortSignal }
-        : ctx.abortSignal ? { abortSignal: ctx.abortSignal } : undefined
+      // Trace + abort + team tool context (delegate_to_agent)
+      const traceBase: Partial<RunOptions> = {
+        ...(config.onTrace
+          ? {
+              onTrace: config.onTrace,
+              runId: ctx.runId ?? '',
+              taskId: task.id,
+              traceAgent: assignee,
+            }
+          : {}),
+        ...(ctx.abortSignal ? { abortSignal: ctx.abortSignal } : {}),
+      }
+      const runOptions: Partial<RunOptions> = {
+        ...traceBase,
+        team: buildTaskAgentTeamInfo(ctx, task.id, traceBase, 0, [assignee]),
+      }
 
       const taskStartMs = config.onTrace ? Date.now() : 0
       let retryCount = 0
 
       const result = await executeWithRetry(
-        () => pool.run(assignee, prompt, traceOptions),
+        () => pool.run(assignee, prompt, runOptions),
         task,
         (retryData) => {
           retryCount++
@@ -711,12 +813,14 @@ export class OpenMultiAgent {
    *
    * Sensible defaults:
    *   - `maxConcurrency`: 5
+   *   - `maxDelegationDepth`: 3
    *   - `defaultModel`:   `'claude-opus-4-6'`
    *   - `defaultProvider`: `'anthropic'`
    */
   constructor(config: OrchestratorConfig = {}) {
     this.config = {
       maxConcurrency: config.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+      maxDelegationDepth: config.maxDelegationDepth ?? DEFAULT_MAX_DELEGATION_DEPTH,
       defaultModel: config.defaultModel ?? DEFAULT_MODEL,
       defaultProvider: config.defaultProvider ?? 'anthropic',
       defaultBaseURL: config.defaultBaseURL,
@@ -1409,7 +1513,7 @@ export class OpenMultiAgent {
         baseURL: config.baseURL ?? this.config.defaultBaseURL,
         apiKey: config.apiKey ?? this.config.defaultApiKey,
       }
-      pool.add(buildAgent(effective))
+      pool.add(buildAgent(effective, { includeDelegateTool: true }))
     }
     return pool
   }

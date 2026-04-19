@@ -77,6 +77,16 @@ export class AgentPool {
     this.semaphore = new Semaphore(maxConcurrency)
   }
 
+  /**
+   * Pool semaphore slots not currently held (`maxConcurrency - active`).
+   * Used to avoid deadlocks when a nested `run()` would wait forever for a slot
+   * held by the parent run. Best-effort only if multiple nested runs start in
+   * parallel after the same synchronous check.
+   */
+  get availableRunSlots(): number {
+    return this.maxConcurrency - this.semaphore.active
+  }
+
   // -------------------------------------------------------------------------
   // Registry operations
   // -------------------------------------------------------------------------
@@ -154,6 +164,32 @@ export class AgentPool {
       }
     } finally {
       agentLock.release()
+    }
+  }
+
+  /**
+   * Run a prompt on a caller-supplied Agent instance, acquiring only the pool
+   * semaphore — no per-agent lock, no registry lookup.
+   *
+   * Designed for delegation: each delegated call should use a **fresh** Agent
+   * instance (matching `delegate_to_agent`'s "runs in a fresh conversation"
+   * semantics), so the per-agent mutex used by {@link run} would be dead
+   * weight and, worse, a deadlock vector for mutual delegation (A→B while
+   * B→A, each caller holding its own `run`'s agent lock).
+   *
+   * The caller is responsible for constructing the Agent; {@link AgentPool}
+   * does not register or track it.
+   */
+  async runEphemeral(
+    agent: Agent,
+    prompt: string,
+    runOptions?: Partial<RunOptions>,
+  ): Promise<AgentRunResult> {
+    await this.semaphore.acquire()
+    try {
+      return await agent.run(prompt, runOptions)
+    } finally {
+      this.semaphore.release()
     }
   }
 
