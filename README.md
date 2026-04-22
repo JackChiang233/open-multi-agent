@@ -17,28 +17,9 @@ CrewAI is Python. LangGraph makes you draw the graph by hand. `open-multi-agent`
 
 - **Goal to result in one call.** `runTeam(team, "Build a REST API")` kicks off a coordinator agent that decomposes the goal into a task DAG, resolves dependencies, runs independent tasks in parallel, and synthesizes the final output. No graph to draw, no tasks to wire up.
 - **TypeScript-native, three runtime dependencies.** `@anthropic-ai/sdk`, `openai`, `zod`. That is the whole runtime. Embed in Express, Next.js, serverless functions, or CI/CD pipelines. No Python runtime, no subprocess bridge, no cloud sidecar.
-- **Multi-model teams.** Claude, GPT, Gemini, Grok, MiniMax, DeepSeek, Copilot, or any OpenAI-compatible local model (Ollama, vLLM, LM Studio, llama.cpp) in the same team. Run the architect on Opus 4.6, the developer on GPT-5.4, the reviewer on local Gemma 4, all in one `runTeam()` call. Gemini ships as an optional peer dependency: `npm install @google/genai` to enable.
+- **Multi-model teams.** Claude, GPT, Gemini, Grok, MiniMax, DeepSeek, Copilot, or any OpenAI-compatible local model (Ollama, vLLM, LM Studio, llama.cpp) in the same team. Run the architect on Opus 4.7, the developer on GPT-5.4, the reviewer on local Gemma 4, all in one `runTeam()` call. Gemini ships as an optional peer dependency: `npm install @google/genai` to enable.
 
 Other features (MCP integration, context strategies, structured output, task retry, human-in-the-loop, lifecycle hooks, loop detection, observability) live below the fold and in [`examples/`](./examples/).
-
-## Philosophy: what we build, what we don't
-
-Our goal is to be the simplest multi-agent framework for TypeScript. Simplicity does not mean closed. We believe the long-term value of a framework is the size of the network it connects to, not its feature checklist.
-
-**We build:**
-- A coordinator that decomposes a goal into a task DAG.
-- A task queue that runs independent tasks in parallel and cascades failures to dependents.
-- A shared memory and message bus so agents can see each other's output.
-- Multi-model teams where each agent can use a different LLM provider.
-
-**We don't build:**
-- **Agent handoffs.** If agent A needs to transfer mid-conversation to agent B, use [OpenAI Agents SDK](https://github.com/openai/openai-agents-python). In our model, each agent owns one task end-to-end, with no mid-conversation transfers.
-- **State persistence / checkpointing.** Not planned for now. Adding a storage backend would break the three-dependency promise, and our workflows run in seconds to minutes, not hours. If real usage shifts toward long-running workflows, we will revisit.
-
-**Tracking:**
-- **A2A protocol.** Watching, will move when production adoption is real.
-
-See [`DECISIONS.md`](./DECISIONS.md) for the full rationale.
 
 ## How is this different from X?
 
@@ -48,14 +29,28 @@ See [`DECISIONS.md`](./DECISIONS.md) for the full rationale.
 
 **vs. [Vercel AI SDK](https://github.com/vercel/ai).** AI SDK is the LLM call layer: a unified TypeScript client for 60+ providers with streaming, tool calls, and structured outputs. It does not orchestrate multi-agent teams. `open-multi-agent` sits on top when you need that. They compose: use AI SDK for single-agent work, reach for this when you need a team.
 
-## Used by
+## Ecosystem
 
-`open-multi-agent` is a new project (launched 2026-04-01, MIT, 5,500+ stars). The ecosystem is still forming, so the list below is short and honest:
+`open-multi-agent` is a new project (launched 2026-04-01, MIT). The ecosystem is still forming, so the lists below are short and honest.
+
+### In production
 
 - **[temodar-agent](https://github.com/xeloxa/temodar-agent)** (~50 stars). WordPress security analysis platform by [Ali Sünbül](https://github.com/xeloxa). Uses our built-in tools (`bash`, `file_*`, `grep`) directly in its Docker runtime. Confirmed production use.
 - **Cybersecurity SOC (home lab).** A private setup running Qwen 2.5 + DeepSeek Coder entirely offline via Ollama, building an autonomous SOC pipeline on Wazuh + Proxmox. Early user, not yet public.
 
 Using `open-multi-agent` in production or a side project? [Open a discussion](https://github.com/JackChen-me/open-multi-agent/discussions) and we will list it here.
+
+### Integrations (free)
+
+- **[Engram](https://www.engram-memory.com)** — "Git for AI memory." Syncs knowledge across agents instantly and flags conflicts. ([repo](https://github.com/Agentscreator/engram-memory))
+
+Built an integration? [Open a discussion](https://github.com/JackChen-me/open-multi-agent/discussions) to get listed.
+
+### Featured Partner ($3,000 / year)
+
+12 months of prominent placement: logo, 100-word description, and a maintainer endorsement quote. For products or platforms already integrated with `open-multi-agent`.
+
+[Inquire about Featured Partner](https://github.com/JackChen-me/open-multi-agent/issues/new?title=Featured+Partner+Inquiry&labels=featured-partner-inquiry)
 
 ## Quick Start
 
@@ -77,7 +72,9 @@ Set the API key for your provider. Local models via Ollama require no API key. S
 - `DEEPSEEK_API_KEY` (for DeepSeek)
 - `GITHUB_TOKEN` (for Copilot)
 
-**CLI (`oma`).** For shell and CI, the package exposes a JSON-first binary. See [docs/cli.md](./docs/cli.md) for `oma run`, `oma task`, `oma provider`, exit codes, and file formats.
+### CLI (`oma`)
+
+For shell and CI, the package exposes a JSON-first binary. See [docs/cli.md](./docs/cli.md) for `oma run`, `oma task`, `oma provider`, exit codes, and file formats.
 
 Three agents, one goal. The framework handles the rest:
 
@@ -181,16 +178,17 @@ Run scripts with `npx tsx examples/basics/team-collaboration.ts`.
          │               └───────────────────────┘
 ┌────────▼──────────┐
 │  Agent            │
-│  - run()          │    ┌──────────────────────┐
-│  - prompt()       │───►│  LLMAdapter          │
-│  - stream()       │    │  - AnthropicAdapter  │
-└────────┬──────────┘    │  - OpenAIAdapter     │
-         │               │  - CopilotAdapter    │
-         │               │  - GeminiAdapter     │
-         │               │  - GrokAdapter       │
-         │               │  - MiniMaxAdapter    │
-         │               │  - DeepSeekAdapter   │
-         │               └──────────────────────┘
+│  - run()          │    ┌────────────────────────┐
+│  - prompt()       │───►│  LLMAdapter            │
+│  - stream()       │    │  - AnthropicAdapter    │
+└────────┬──────────┘    │  - OpenAIAdapter       │
+         │               │  - AzureOpenAIAdapter  │
+         │               │  - CopilotAdapter      │
+         │               │  - GeminiAdapter       │
+         │               │  - GrokAdapter         │
+         │               │  - MiniMaxAdapter      │
+         │               │  - DeepSeekAdapter     │
+         │               └────────────────────────┘
 ┌────────▼──────────┐
 │  AgentRunner      │    ┌──────────────────────┐
 │  - conversation   │───►│  ToolRegistry        │
@@ -379,8 +377,6 @@ Pairs well with `compressToolResults` and `maxToolOutputChars` above.
 
 Gemini requires `npm install @google/genai` (optional peer dependency).
 
-Verified local models with tool-calling: **Gemma 4** (see [`providers/gemma4-local`](examples/providers/gemma4-local.ts)).
-
 Any OpenAI-compatible API should work via `provider: 'openai'` + `baseURL` (Mistral, Qwen, Moonshot, Doubao, etc.). Groq is now verified in [`providers/groq`](examples/providers/groq.ts). **Grok, MiniMax, and DeepSeek now have first-class support** via `provider: 'grok'`, `provider: 'minimax'`, and `provider: 'deepseek'`.
 
 ### Local Model Tool-Calling
@@ -460,16 +456,16 @@ Issues, feature requests, and PRs are welcome. Some areas where contributions wo
 ## Contributors
 
 <a href="https://github.com/JackChen-me/open-multi-agent/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent&max=20&v=20260419" />
+  <img src="https://contrib.rocks/image?repo=JackChen-me/open-multi-agent&max=20&v=20260423" />
 </a>
 
 ## Star History
 
 <a href="https://star-history.com/#JackChen-me/open-multi-agent&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&theme=dark&v=20260423" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260423" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=JackChen-me/open-multi-agent&type=Date&v=20260423" />
  </picture>
 </a>
 
