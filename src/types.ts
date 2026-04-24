@@ -6,6 +6,7 @@
  */
 
 import type { ZodSchema } from 'zod'
+import type { SupportedProvider } from './llm/adapter.js'
 
 // ---------------------------------------------------------------------------
 // Content blocks
@@ -84,6 +85,11 @@ export type ContextStrategy =
     }
   | {
     type: 'custom'
+    /**
+     * Compaction callback. Invoked before every LLM turn including the first,
+     * so implementations that should only fire past a token threshold must
+     * self-gate inside this function.
+     */
     compress: (
       messages: LLMMessage[],
       estimatedTokens: number,
@@ -269,7 +275,7 @@ export interface BeforeRunHookContext {
 export interface AgentConfig {
   readonly name: string
   readonly model: string
-  readonly provider?: 'anthropic' | 'copilot' | 'grok' | 'openai' | 'gemini' | 'qiniu'
+  readonly provider?: SupportedProvider
   /**
    * Custom base URL for OpenAI-compatible APIs (Ollama, vLLM, LM Studio, etc.).
    * Note: local servers that don't require auth still need `apiKey` set to a
@@ -435,6 +441,15 @@ export interface TeamConfig {
   readonly name: string
   readonly agents: readonly AgentConfig[]
   readonly sharedMemory?: boolean
+  /**
+   * Custom {@link MemoryStore} backing the team's shared memory (e.g. Redis,
+   * Postgres, or a remote service). When provided, shared memory is enabled
+   * regardless of `sharedMemory`. When both are set, `sharedMemoryStore` wins.
+   * When omitted and `sharedMemory` is `true`, the default in-memory store is used.
+   *
+   * SDK-only: the CLI (`oma`) cannot pass runtime objects through its JSON config.
+   */
+  readonly sharedMemoryStore?: MemoryStore
   readonly maxConcurrency?: number
 }
 
@@ -541,7 +556,7 @@ export interface OrchestratorConfig {
   /** Maximum cumulative tokens (input + output) allowed per orchestrator run. */
   readonly maxTokenBudget?: number
   readonly defaultModel?: string
-  readonly defaultProvider?: 'anthropic' | 'copilot' | 'grok' | 'openai' | 'gemini' | 'qiniu'
+  readonly defaultProvider?: SupportedProvider
   readonly defaultBaseURL?: string
   readonly defaultApiKey?: string
   readonly onProgress?: (event: OrchestratorEvent) => void
@@ -574,7 +589,7 @@ export interface OrchestratorConfig {
 export interface CoordinatorConfig {
   /** Coordinator model. Defaults to `OrchestratorConfig.defaultModel`. */
   readonly model?: string
-  readonly provider?: 'anthropic' | 'copilot' | 'grok' | 'openai' | 'gemini' | 'qiniu'
+  readonly provider?: SupportedProvider
   readonly baseURL?: string
   readonly apiKey?: string
   /**
