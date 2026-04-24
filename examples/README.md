@@ -44,6 +44,7 @@ Reusable shapes for common multi-agent problems.
 | [`patterns/task-retry`](patterns/task-retry.ts) | Per-task retry with exponential backoff. |
 | [`patterns/multi-perspective-code-review`](patterns/multi-perspective-code-review.ts) | Multiple reviewer agents in parallel, then synthesis. |
 | [`patterns/research-aggregation`](patterns/research-aggregation.ts) | Multi-source research collated by a synthesis agent. |
+| [`patterns/cost-tiered-pipeline`](patterns/cost-tiered-pipeline.ts) | Run the same four-stage pipeline twice to compare flagship vs tiered model cost. |
 | [`patterns/agent-handoff`](patterns/agent-handoff.ts) | Synchronous sub-agent delegation via `delegate_to_agent`. |
 
 ## cookbook — use-case recipes
